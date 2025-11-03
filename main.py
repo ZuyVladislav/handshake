@@ -26,6 +26,8 @@ parser.add_argument("--multi", nargs=1,
                     help="fan-outs, например 3,3,3  →  27 маршрутов")
 parser.add_argument("--debug", action="store_true",
                     help="уровень логирования DEBUG + TRACE")
+parser.add_argument("--config", help="путь к config.json|yaml с сетью")
+parser.add_argument("--node", help="имя узла для сетевого режима")
 args = parser.parse_args()
 
 logging.basicConfig(
@@ -61,9 +63,44 @@ def demo_handshake() -> None:
 
 # ────────────────────────── main ─────────────────────────────
 if __name__ == "__main__":
-    if args.multi:
+    if args.node:
+        if not args.config:
+            parser.error("--node требует указать --config")
+        from handshake.netconfig import load_config
+        from handshake.transport import TcpTransport
+        from handshake.node import Node
+
+        cfg = load_config(args.config)
+        node_cfg = cfg.node(args.node)
+
+        node = Node(node_cfg.name)
+        peers = cfg.peers_for(node_cfg.name)
+        transport = TcpTransport(
+            node,
+            bind_host=node_cfg.host,
+            bind_port=node_cfg.port,
+            peers=peers,
+            login=node_cfg.credentials.login,
+            password=node_cfg.credentials.password,
+            auth_db=cfg.auth_db(),
+        )
+        node.attach_transport(transport)
+        transport.start()
+        log.info("Узел %s запущен, ожидание сообщений (Ctrl+C для выхода)", node.name)
+
+        try:
+            while True:
+                payload = node.inbox.pop(0)
+                log.info("Получено сообщение len=%s", len(payload) if hasattr(payload, "__len__") else type(payload))
+        except KeyboardInterrupt:
+            log.info("Остановка узла %s", node.name)
+        finally:
+            transport.stop()
+    elif args.multi:
         fanouts = [int(x) for x in args.multi[0].split(",")]
         log.info("Запуск multistart (handshake)  fanouts=%s", fanouts)
         multistart_handshake(fanouts=fanouts, debug=args.debug)
     else:
+        if args.config:
+            log.warning("--config применён без --node; используется локальный демо-режим")
         demo_handshake()

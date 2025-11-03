@@ -9,8 +9,12 @@ handshake.node — базовый класс узла протокола
 import json
 import logging
 import threading
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, Optional, Union
+
+if TYPE_CHECKING:
+    from handshake.transport import Transport
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa, dh
@@ -50,6 +54,60 @@ def _sa_lock(name: str) -> threading.Lock:
 
 
 # ─────────────────────────────  Node  ────────────────────────────────
+class Inbox:
+    """Потокобезопасная очередь сообщений узла."""
+
+    def __init__(self) -> None:
+        self._items: Deque[Any] = deque()
+        self._cv = threading.Condition()
+
+    # --- коллекционный интерфейс -----------------------------------
+    def __bool__(self) -> bool:  # bool(queue)
+        with self._cv:
+            return bool(self._items)
+
+    def __len__(self) -> int:
+        with self._cv:
+            return len(self._items)
+
+    def __iter__(self) -> Iterable[Any]:
+        while True:
+            item = self.pop(0)
+            yield item
+
+    # --- основные операции -----------------------------------------
+    def append(self, item: Any) -> None:
+        with self._cv:
+            self._items.append(item)
+            self._cv.notify()
+
+    def extend(self, items: Iterable[Any]) -> None:
+        with self._cv:
+            self._items.extend(items)
+            self._cv.notify_all()
+
+    def pop(self, index: Optional[int] = None) -> Any:
+        """Возвращает элемент с блокировкой до появления данных."""
+        with self._cv:
+            while not self._items:
+                self._cv.wait()
+            if index is None:
+                return self._items.pop()
+            if index == 0:
+                return self._items.popleft()
+            if index == -1:
+                return self._items.pop()
+            # random index → придётся материализовать deque в list
+            item_list = list(self._items)
+            value = item_list.pop(index)
+            self._items = deque(item_list)
+            return value
+
+    def clear(self) -> None:
+        with self._cv:
+            self._items.clear()
+
+
 @dataclass
 class Node:
     name: str
@@ -58,7 +116,10 @@ class Node:
     rsa_priv: rsa.RSAPrivateKey = field(default_factory=rsa_gen)
 
     # «Сетевой» буфер
-    inbox: List[Any] = field(default_factory=list)
+    inbox: Inbox = field(default_factory=Inbox)
+
+    # Транспорт ------------------------------------------------------
+    transport: Optional["Transport"] = None
 
     # DH ---------------------------------------------------------------
     dh_params: Dict[str, dh.DHParameters] = field(default_factory=dict)
@@ -146,11 +207,28 @@ class Node:
         return spi in _sa_store(self.name)
 
     # ───────────────── «сетевые» слои ────────────────────────────────
+    def attach_transport(self, transport: "Transport") -> None:
+        """Привязывает внешний транспорт к узлу."""
+        self.transport = transport
+
+    # --- helpers -----------------------------------------------------
+    def _deliver(self, dst: Union["Node", str], blob: Any) -> None:
+        if isinstance(dst, Node):
+            dst.inbox.append(blob)
+        else:
+            if self.transport is None:
+                raise RuntimeError(
+                    f"У узла {self.name} не настроен транспорт для отправки {dst}"
+                )
+            self.transport.send(dst, blob)
+
     # --- RSA ---------------------------------------------------------
-    def send_rsa(self, dst: "Node", payload: Dict[str, Any], step: str = "?"):
-        blob = rsa_encrypt(dst.pub(), json.dumps(payload).encode())
-        dst.inbox.append(blob)
-        trace(step, self.name, dst.name, "RSA-send", payload)
+    def send_rsa(self, dst: Union["Node", str], payload: Dict[str, Any], step: str = "?"):
+        pub_key = dst.pub() if isinstance(dst, Node) else self.transport.peer_pub(dst)
+        blob = rsa_encrypt(pub_key, json.dumps(payload).encode())
+        self._deliver(dst, blob)
+        dst_name = dst.name if isinstance(dst, Node) else dst
+        trace(step, self.name, dst_name, "RSA-send", payload)
 
     def recv_rsa(self) -> Dict[str, Any]:
         blob = self.inbox.pop(0)
@@ -159,18 +237,20 @@ class Node:
         return payload
 
     # --- DH ----------------------------------------------------------
-    def send_sym(self, chan: str, dst: "Node",
+    def send_sym(self, chan: str, dst: Union["Node", str],
                  payload: Dict[str, Any], step: str = "?"):
         cipher = sym_encrypt(self.dh_key(chan), json.dumps(payload).encode())
-        dst.inbox.append(cipher)
-        trace(step, self.name, dst.name, f"DH({chan})-send", payload)
+        self._deliver(dst, cipher)
+        dst_name = dst.name if isinstance(dst, Node) else dst
+        trace(step, self.name, dst_name, f"DH({chan})-send", payload)
 
         # preview-decrypt на стороне dst, чтобы сразу отметить доставку
-        try:
-            plain = sym_decrypt(dst.dh_key(chan), cipher)
-            dst._record_sa_packet(json.loads(plain))
-        except Exception:
-            pass
+        if isinstance(dst, Node):
+            try:
+                plain = sym_decrypt(dst.dh_key(chan), cipher)
+                dst._record_sa_packet(json.loads(plain))
+            except Exception:
+                pass
 
     def recv_sym(self, chan: str) -> Dict[str, Any]:
         cipher = self.inbox.pop(0)
