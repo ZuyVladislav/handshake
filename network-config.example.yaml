@@ -1,0 +1,52 @@
+# Пример конфигурации сети для handshake
+nodes:
+  - name: A
+    host: 0.0.0.0
+    port: 5001
+    credentials:
+      login: nodeA
+      password: secretA
+    neighbors:
+      X1: X1
+    public_key: |
+      -----BEGIN PUBLIC KEY-----
+      ... вставьте PEM-ключ узла A ...
+      -----END PUBLIC KEY-----
+  - name: X1
+    host: 0.0.0.0
+    port: 5002
+    credentials:
+      login: nodeX1
+      password: secretX1
+    neighbors:
+      A: A
+      X2: X2
+    public_key: |
+      -----BEGIN PUBLIC KEY-----
+      ... вставьте PEM-ключ узла X1 ...
+      -----END PUBLIC KEY-----
+  - name: X2
+    host: 0.0.0.0
+    port: 5003
+    credentials:
+      login: nodeX2
+      password: secretX2
+    neighbors:
+      X1: X1
+      B: B
+    public_key: |
+      -----BEGIN PUBLIC KEY-----
+      ... вставьте PEM-ключ узла X2 ...
+      -----END PUBLIC KEY-----
+  - name: B
+    host: 0.0.0.0
+    port: 5004
+    credentials:
+      login: nodeB
+      password: secretB
+    neighbors:
+      X2: X2
+    public_key: |
+      -----BEGIN PUBLIC KEY-----
+      ... вставьте PEM-ключ узла B ...
+      -----END PUBLIC KEY-----
